@@ -1,0 +1,1371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VoiceLoop</title>
+<!--
+================================================================================
+  VoiceLoop v1.0
+  A hands-free listen-and-respond tool for AI agent workflows.
+  Paste an agent response → hear it read aloud block by block → speak replies
+  → copy a labelled BLOCK/REPLY document back to the agent.
+
+  DELIVERY
+  Primary:  GitHub Pages (HTTPS). Bookmark the Pages URL in Chrome on desktop
+            and Android. Updates go live on the next git push.
+  Fallback: python -m http.server 8000
+            Then open: http://localhost:8000/VoiceLoop.html
+            (HTTPS or localhost required — SpeechRecognition will not work
+            under file:// in current Chrome versions.)
+
+  KNOWN LIMITATIONS
+  - STT requires active internet. Chrome sends audio to Google's servers.
+    Offline use (no data) will fail silently.
+  - Samsung Bixby may conflict with Chrome's microphone access on Galaxy
+    devices. This is a system-level issue and cannot be fixed in code.
+    Workaround: disable Bixby voice wake-up in Samsung settings.
+
+  TUNABLE CONSTANTS
+  All timing constants are grouped at the top of the <script> block below.
+  TTS_STT_DELAY_MS is the most likely candidate for adjustment on new devices.
+================================================================================
+-->
+<style>
+/* ── Reset & base ─────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+  background: #f0f0f0;
+  color: #222;
+  height: 100dvh;
+  height: 100vh; /* fallback */
+  overflow: hidden;
+}
+
+button {
+  font-size: 15px;
+  cursor: pointer;
+  border: none;
+  border-radius: 6px;
+  padding: 10px 14px;
+  min-width: 48px;
+  min-height: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  transition: background 0.12s, opacity 0.12s;
+}
+
+button:disabled { opacity: 0.38; cursor: not-allowed; }
+
+textarea, select {
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  padding: 10px;
+  width: 100%;
+}
+
+textarea { resize: vertical; }
+
+/* ── App shell ────────────────────────────────────────────────────────────── */
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* ── Header ───────────────────────────────────────────────────────────────── */
+#header {
+  background: #1a1a2e;
+  color: #fff;
+  padding: 8px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  gap: 8px;
+}
+
+#header h1 { font-size: 17px; font-weight: 700; letter-spacing: 0.05em; }
+
+#header-status {
+  font-size: 12px;
+  opacity: 0.8;
+  flex: 1;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Settings panel ───────────────────────────────────────────────────────── */
+#settings-panel {
+  display: none;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+  background: #fff;
+  border-bottom: 1px solid #ddd;
+  flex-shrink: 0;
+  overflow-y: auto;
+  max-height: 55vh;
+}
+
+#settings-panel.open { display: flex; }
+
+#settings-panel label { font-size: 14px; font-weight: 600; display: block; margin-bottom: 4px; }
+
+#settings-panel input[type=range] { width: 100%; }
+
+#vocab-area {
+  font-family: monospace;
+  font-size: 13px;
+  min-height: 80px;
+}
+
+/* ── Resume banner (app backgrounded) ────────────────────────────────────── */
+#resume-banner {
+  display: none;
+  position: fixed;
+  top: 52px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #e67e22;
+  color: #fff;
+  padding: 10px 20px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  z-index: 500;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+/* ── Button colour classes ────────────────────────────────────────────────── */
+.btn-dark     { background: #1a1a2e; color: #fff; }
+.btn-dark:hover:not(:disabled)    { background: #2d2d50; }
+.btn-muted    { background: #e0e0e0; color: #222; }
+.btn-muted:hover:not(:disabled)   { background: #cacaca; }
+.btn-rec      { background: #c0392b; color: #fff; }
+.btn-rec:hover:not(:disabled)     { background: #a93226; }
+.btn-recactive{ background: #e74c3c; color: #fff; animation: pulse 1.1s ease-in-out infinite; }
+.btn-green    { background: #27ae60; color: #fff; }
+.btn-green:hover:not(:disabled)   { background: #229954; }
+.btn-hdr      { background: rgba(255,255,255,0.15); color: #fff; font-size: 13px;
+                min-height: 32px; padding: 4px 10px; }
+.btn-hdr:hover:not(:disabled)     { background: rgba(255,255,255,0.25); }
+
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.65} }
+
+/* ── Section label ────────────────────────────────────────────────────────── */
+.sec-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #777;
+  margin-bottom: 4px;
+}
+
+/* ── Control row ──────────────────────────────────────────────────────────── */
+.ctrl { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+
+/* ── DESKTOP layout (≥ 600px) ─────────────────────────────────────────────── */
+#desktop-main {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+#panel-left {
+  width: 38%;
+  min-width: 260px;
+  max-width: 440px;
+  display: flex;
+  flex-direction: column;
+  padding: 14px;
+  gap: 10px;
+  border-right: 1px solid #d8d8d8;
+  background: #fff;
+  overflow-y: auto;
+}
+
+#input-area { flex: 1; min-height: 180px; }
+
+#panel-right {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 14px;
+  gap: 12px;
+  background: #fafafa;
+  overflow-y: auto;
+}
+
+#block-display {
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  padding: 12px 14px;
+  font-size: 15px;
+  line-height: 1.65;
+  max-height: 200px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #333;
+}
+
+#reply-area  { min-height: 90px; }
+#output-area { min-height: 130px; font-family: monospace; font-size: 13px; background: #fff; }
+
+#stt-hint {
+  font-size: 12px;
+  color: #999;
+  font-style: italic;
+  min-height: 18px;
+}
+
+/* Keyboard shortcuts hint */
+#kb-hint {
+  font-size: 12px;
+  color: #bbb;
+  margin-top: auto;
+  padding-top: 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+#kb-body {
+  display: none;
+  font-size: 12px;
+  color: #888;
+  line-height: 2;
+  margin-top: 4px;
+}
+
+#kb-body.open { display: block; }
+
+/* ── MOBILE layout (< 600px) ─────────────────────────────────────────────── */
+#mobile-main  { display: none; flex: 1; flex-direction: column; overflow: hidden; }
+
+#mobile-tabs {
+  display: flex;
+  background: #fff;
+  border-bottom: 1px solid #ddd;
+  flex-shrink: 0;
+}
+
+.m-tab {
+  flex: 1;
+  padding: 11px 4px;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: #777;
+  background: none;
+  border: none;
+  border-bottom: 3px solid transparent;
+  border-radius: 0;
+  min-height: 44px;
+  cursor: pointer;
+}
+
+.m-tab.active { color: #1a1a2e; border-bottom-color: #1a1a2e; }
+
+#mobile-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+  padding-bottom: 76px; /* room for fixed bar */
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Fixed control bar */
+#mobile-bar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: #fff;
+  border-top: 1px solid #ddd;
+  padding: 7px 10px;
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+  z-index: 200;
+}
+
+#mobile-bar button {
+  flex: 1;
+  font-size: 13px;
+  padding: 9px 4px;
+  min-height: 48px;
+}
+
+#mobile-rec-bar  { display: flex; gap: 6px; width: 100%; }
+#mobile-rev-bar  { display: none; gap: 6px; width: 100%; }
+
+#mobile-block-display {
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 15px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #333;
+  overflow-y: auto;
+}
+
+#mobile-stt-hint { font-size: 12px; color: #999; font-style: italic; min-height: 18px; }
+#mobile-reply-area { min-height: 90px; }
+#mobile-output-area { min-height: 200px; font-family: monospace; font-size: 13px; }
+
+/* ── Responsive show/hide ─────────────────────────────────────────────────── */
+@media (max-width: 599px) {
+  #desktop-main { display: none !important; }
+  #mobile-main  { display: flex; }
+  #kb-hint      { display: none; }
+}
+
+@media (min-width: 600px) {
+  #mobile-main  { display: none !important; }
+  #mobile-bar   { display: none !important; }
+  #mobile-tabs  { display: none !important; }
+}
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- ── Header ──────────────────────────────────────────────────────────── -->
+  <div id="header">
+    <h1>VoiceLoop</h1>
+    <span id="header-status"></span>
+    <button class="btn-hdr" onclick="toggleSettings()">⚙ Settings</button>
+  </div>
+
+  <!-- ── Settings (shared desktop / mobile) ──────────────────────────────── -->
+  <div id="settings-panel">
+    <div class="sec-label">Settings</div>
+
+    <div id="voice-row">
+      <label for="voice-sel">TTS Voice</label>
+      <select id="voice-sel" onchange="saveSettings()">
+        <option value="">Using device default</option>
+      </select>
+    </div>
+
+    <div>
+      <label>TTS Speed: <span id="speed-val">1.0</span>×</label>
+      <input type="range" id="speed-slider" min="0.7" max="1.5" step="0.05" value="1.0"
+             oninput="document.getElementById('speed-val').textContent=parseFloat(this.value).toFixed(2);saveSettings();">
+    </div>
+
+    <div>
+      <label>
+        <input type="checkbox" id="auto-rec-chk" onchange="saveSettings()">
+        Auto-record after TTS finishes (default: OFF)
+      </label>
+    </div>
+
+    <div>
+      <label for="vocab-area">
+        Vocabulary replacements — one per line: <code>spoken → intended</code>
+      </label>
+      <textarea id="vocab-area" rows="5"
+        placeholder="fill a sake ha → phyloseq&#10;study → STDY&#10;come in cagey ha → cumN_kgha&#10;response SI → respSI"
+        oninput="saveSettings()"></textarea>
+      <p style="font-size:12px;color:#888;margin-top:4px;">Settings are saved on this device only.</p>
+    </div>
+
+    <div>
+      <button class="btn-muted" onclick="toggleSettings()" style="align-self:flex-start;">
+        Close
+      </button>
+    </div>
+  </div>
+
+  <!-- ── Resume banner (shown when app returns from background) ───────────── -->
+  <div id="resume-banner" onclick="dismissBanner()"></div>
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!--  DESKTOP LAYOUT (≥ 600px)                                             -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <div id="desktop-main">
+
+    <!-- Left: input panel -->
+    <div id="panel-left">
+      <div class="sec-label">Input</div>
+      <textarea id="input-area" placeholder="Paste agent message here…"></textarea>
+
+      <div class="ctrl">
+        <button class="btn-dark" onclick="parseInput(false)">Parse</button>
+        <label style="font-size:14px;display:flex;align-items:center;gap:5px;">
+          <input type="checkbox" id="single-toggle"> Single block
+        </label>
+      </div>
+      <div id="parse-status" style="font-size:13px;color:#666;min-height:18px;"></div>
+    </div>
+
+    <!-- Right: playback / record / output panel -->
+    <div id="panel-right">
+
+      <!-- Progress + navigation -->
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+        <span id="d-progress" style="font-size:14px;font-weight:600;color:#555;">No blocks loaded</span>
+        <div class="ctrl">
+          <button class="btn-muted" id="d-btn-prev" onclick="prevBlock()" title="← Previous">← Prev</button>
+          <button class="btn-muted" id="d-btn-next" onclick="nextBlock()" title="→ Next">Next →</button>
+        </div>
+      </div>
+
+      <!-- Current block -->
+      <div>
+        <div class="sec-label">Current Block</div>
+        <div id="block-display">—</div>
+      </div>
+
+      <!-- TTS controls -->
+      <div>
+        <div class="sec-label">Playback</div>
+        <div class="ctrl">
+          <button class="btn-dark" id="d-btn-play" onclick="togglePlayPause()">▶ Read</button>
+          <button class="btn-muted" id="d-btn-reread" onclick="rereadBlock()">↺ Re-read</button>
+          <button class="btn-muted" id="d-btn-stopreading" onclick="toggleStopResumeReading()">⏹ Stop Reading</button>
+        </div>
+      </div>
+
+      <!-- STT controls -->
+      <div>
+        <div class="sec-label">Recording</div>
+        <div class="ctrl">
+          <button class="btn-rec" id="d-btn-rec" onclick="toggleRecording()">🎙 Start Recording</button>
+          <button class="btn-muted" onclick="clearReply()">✕ Clear Reply</button>
+        </div>
+        <div id="stt-hint"></div>
+      </div>
+
+      <!-- Reply -->
+      <div>
+        <div class="sec-label">Reply</div>
+        <textarea id="reply-area" placeholder="Transcribed reply appears here — editable at any time…"></textarea>
+      </div>
+
+      <!-- Output -->
+      <div>
+        <div class="sec-label">Output Document</div>
+        <textarea id="output-area" readonly placeholder="Output builds as you complete replies…"></textarea>
+        <div class="ctrl" style="margin-top:8px;">
+          <button class="btn-green" onclick="copyOutput()">📋 Copy</button>
+          <button class="btn-muted"  onclick="downloadOutput()">⬇ Download .txt</button>
+        </div>
+      </div>
+
+      <!-- Keyboard shortcuts -->
+      <div id="kb-hint" onclick="toggleKbHint()">⌨ Keyboard shortcuts ▾</div>
+      <div id="kb-body">
+        <b>Space</b>: Pause/Resume TTS &nbsp;
+        <b>R</b>: Re-read &nbsp;
+        <b>Enter</b>: Start/Stop Recording &nbsp;
+        <b>→</b>: Next block &nbsp;
+        <b>←</b>: Previous block
+      </div>
+    </div>
+
+  </div><!-- /#desktop-main -->
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!--  MOBILE LAYOUT (< 600px)                                              -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <div id="mobile-main">
+
+    <!-- Tab row -->
+    <div id="mobile-tabs">
+      <button class="m-tab active" id="tab-input"     onclick="switchTab('input')">Input</button>
+      <button class="m-tab"        id="tab-recording" onclick="switchTab('recording')">Recording</button>
+      <button class="m-tab"        id="tab-review"    onclick="switchTab('review')">Review</button>
+    </div>
+
+    <!-- Scrollable content -->
+    <div id="mobile-scroll">
+
+      <!-- Input tab -->
+      <div id="view-input" style="display:flex;flex-direction:column;gap:10px;">
+        <textarea id="m-input-area" placeholder="Paste agent message here…" rows="10"></textarea>
+        <div class="ctrl">
+          <button class="btn-dark" onclick="parseInput(true)" style="flex:1;">Parse</button>
+          <label style="font-size:14px;display:flex;align-items:center;gap:5px;white-space:nowrap;">
+            <input type="checkbox" id="m-single-toggle"> Single block
+          </label>
+        </div>
+        <div id="m-parse-status" style="font-size:13px;color:#666;min-height:18px;"></div>
+      </div>
+
+      <!-- Recording tab -->
+      <div id="view-recording" style="display:none;flex-direction:column;gap:10px;">
+        <div id="m-progress" style="font-size:14px;font-weight:600;color:#555;">No blocks loaded</div>
+        <div class="sec-label" style="margin:0;">Current Block</div>
+        <div id="mobile-block-display">—</div>
+        <div id="mobile-stt-hint"></div>
+        <div class="sec-label" style="margin:0;">Reply</div>
+        <textarea id="mobile-reply-area" placeholder="Transcribed reply appears here…"></textarea>
+        <button class="btn-muted" onclick="clearReply()" style="align-self:flex-start;font-size:13px;min-height:40px;">
+          ✕ Clear Reply
+        </button>
+      </div>
+
+      <!-- Review tab -->
+      <div id="view-review" style="display:none;flex-direction:column;gap:10px;">
+        <div class="sec-label" style="margin:0;">Output Document</div>
+        <textarea id="mobile-output-area" readonly rows="18"></textarea>
+      </div>
+
+    </div><!-- /#mobile-scroll -->
+
+    <!-- Fixed control bar -->
+    <div id="mobile-bar">
+      <!-- Recording mode controls -->
+      <div id="mobile-rec-bar">
+        <button class="btn-dark"  id="m-btn-play"      onclick="togglePlayPause()">▶</button>
+        <button class="btn-muted" id="m-btn-stopreading" onclick="toggleStopResumeReading()">⏹</button>
+        <button class="btn-rec"   id="m-btn-rec"       onclick="toggleRecording()">🎙</button>
+        <button class="btn-muted" id="m-btn-prev"      onclick="prevBlock()" style="flex:0 0 48px;font-size:20px;font-weight:700;">←</button>
+        <button class="btn-muted" id="m-btn-next"      onclick="nextBlock()" style="flex:0 0 48px;font-size:20px;font-weight:700;">→</button>
+      </div>
+      <!-- Review mode controls -->
+      <div id="mobile-rev-bar">
+        <button class="btn-green" onclick="copyOutput()"     style="flex:1;">📋 Copy</button>
+        <button class="btn-muted" onclick="downloadOutput()" style="flex:1;">⬇ Download</button>
+      </div>
+    </div>
+
+  </div><!-- /#mobile-main -->
+
+</div><!-- /#app -->
+
+<script>
+// ============================================================================
+//  CONFIGURABLE CONSTANTS
+//  Change these here — do not scatter magic numbers through the code.
+// ============================================================================
+const TTS_STT_DELAY_MS     = 300;  // ms between TTS onend and auto-record start
+                                    // Increase (e.g. to 500) if TTS bleeds into mic on Android
+const STT_RESTART_DELAY_MS = 120;  // ms before restarting SpeechRecognition in onend
+const VOICE_FALLBACK_MS    = 500;  // ms to wait if voiceschanged hasn't fired yet
+const CANCEL_SPEAK_DELAY   = 55;   // ms between cancel() and speak() — prevents Android silence bug
+const RESUME_SPEAK_DELAY_MS = 400; // ms to wait on Resume path — engine already cancelled, needs longer to settle
+
+// ============================================================================
+//  STATE
+//  All session content lives here; nothing is written to localStorage.
+// ============================================================================
+const S = {
+  blocks:          [],     // string[] — parsed blocks
+  replies:         [],     // string[] — one reply per block (preserved on navigation)
+  cur:             0,      // current block index
+  isPlaying:       false,  // TTS is speaking (not paused)
+  isPaused:        false,  // TTS paused mid-utterance
+  isStopRead:      false,  // user explicitly stopped reading via Stop Reading btn
+  isRecording:     false,  // STT active
+  ttsNatural:      false,  // true only when TTS ended without cancel()
+  bgBlock:         null,   // block index at time of backgrounding
+  mobileTab:       'input',
+};
+
+// ============================================================================
+//  INIT
+// ============================================================================
+document.addEventListener('DOMContentLoaded', () => {
+  loadSettings();
+  initTTS();
+  initSTT();
+  initKeyboard();
+  initVisibility();
+  initViewport();
+  updateUI();
+});
+
+// ============================================================================
+//  SETTINGS — localStorage
+// ============================================================================
+function loadSettings() {
+  const speed   = localStorage.getItem('vl_speed')     || '1.0';
+  const autoRec = localStorage.getItem('vl_autorec')   === 'true';
+  const vocab   = localStorage.getItem('vl_vocab')     || '';
+
+  document.getElementById('speed-slider').value = speed;
+  document.getElementById('speed-val').textContent = parseFloat(speed).toFixed(2);
+  document.getElementById('auto-rec-chk').checked  = autoRec;
+  document.getElementById('vocab-area').value       = vocab;
+  // Voice name applied after voices load (see populateVoiceSel)
+}
+
+function saveSettings() {
+  localStorage.setItem('vl_speed',   document.getElementById('speed-slider').value);
+  localStorage.setItem('vl_autorec', document.getElementById('auto-rec-chk').checked);
+  localStorage.setItem('vl_vocab',   document.getElementById('vocab-area').value);
+  const voiceName = document.getElementById('voice-sel').value;
+  if (voiceName) localStorage.setItem('vl_voice', voiceName);
+}
+
+function toggleSettings() {
+  document.getElementById('settings-panel').classList.toggle('open');
+}
+
+// ============================================================================
+//  PARSER
+//  Priority: #>START / #>END  →  ## fallback  →  numbered fallback
+// ============================================================================
+function parseInput(isMobile) {
+  const srcId    = isMobile ? 'm-input-area'    : 'input-area';
+  const statId   = isMobile ? 'm-parse-status'  : 'parse-status';
+  const singleId = isMobile ? 'm-single-toggle' : 'single-toggle';
+
+  const text = document.getElementById(srcId).value.trim();
+  if (!text) { showParseStatus(statId, 'Nothing to parse.'); return; }
+
+  // Sync to the other panel so both show the same text
+  document.getElementById('input-area').value   = text;
+  document.getElementById('m-input-area').value = text;
+
+  // Check either toggle (user may have set it on the other panel)
+  const single = document.getElementById('single-toggle').checked ||
+                 document.getElementById('m-single-toggle').checked;
+
+  const blocks = single ? [text] : parseBlocks(text);
+
+  S.blocks  = blocks;
+  S.replies = blocks.map(() => '');
+  S.cur     = 0;
+
+  const msg = `Parsed ${blocks.length} block${blocks.length === 1 ? '' : 's'}.`;
+  showParseStatus('parse-status',   msg);
+  showParseStatus('m-parse-status', msg);
+
+  updateUI();
+  if (isMobile) switchTab('recording');
+}
+
+function showParseStatus(id, msg) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = msg;
+}
+
+// Top-level parser: try delimiters first, then headers, then return whole text
+function parseBlocks(text) {
+  const byDelim = parseByDelimiters(text);
+  if (byDelim) return byDelim;
+  return parseByHeaders(text);
+}
+
+// ── Primary: #>START / #>END (case-insensitive, one per line) ────────────────
+function parseByDelimiters(text) {
+  // Only enter this path if at least one #>START is present
+  if (!/^#>start\s*$/im.test(text)) return null;
+
+  const lines   = text.split('\n');
+  const blocks  = [];
+  const context = [];
+  let inBlock   = false;
+  let current   = [];
+
+  for (const line of lines) {
+    const t = line.trim().toUpperCase();
+    if (t === '#>START') {
+      inBlock = true;
+      current = [];
+    } else if (t === '#>END') {
+      if (inBlock) {
+        const b = current.join('\n').trim();
+        if (b) blocks.push(b);
+        current = [];
+        inBlock = false;
+      }
+    } else if (inBlock) {
+      current.push(line);
+    } else {
+      context.push(line);
+    }
+  }
+
+  if (blocks.length === 0) return null;
+
+  const ctx = context.join('\n').trim();
+  return ctx ? [ctx, ...blocks] : blocks;
+}
+
+// ── Secondary: /^## / with fenced code block suppression ─────────────────────
+function parseByHeaders(text) {
+  // Matches ## headers OR numbered patterns at line start
+  const isBoundary = (line) =>
+    /^## /.test(line) ||
+    /^(\d{1,2}[.)]\s|Q\d{1,2}[:.]\s)/i.test(line);
+
+  const lines   = text.split('\n');
+  const blocks  = [];
+  let current   = [];
+  let inFence   = false;
+
+  for (const line of lines) {
+    // Track fenced code blocks — do not split inside them
+    if (/^(`{3,}|~{3,})/.test(line.trim())) {
+      inFence = !inFence;
+      current.push(line);
+      continue;
+    }
+
+    if (!inFence && isBoundary(line) && current.length > 0) {
+      blocks.push(current.join('\n').trim());
+      current = [line];
+    } else {
+      current.push(line);
+    }
+  }
+  if (current.length > 0) {
+    const b = current.join('\n').trim();
+    if (b) blocks.push(b);
+  }
+
+  return blocks.filter(b => b.length > 0);
+}
+
+// ============================================================================
+//  VOCABULARY SUBSTITUTION ENGINE
+//  Applied to each final STT result before it enters the reply field.
+//  Matching: case-insensitive, word-boundary.
+//  Replacement: exact case as entered by user.
+//  Pairs sorted by decreasing spoken-form length to prevent partial matches.
+// ============================================================================
+function applyVocab(text) {
+  const raw = document.getElementById('vocab-area').value.trim();
+  if (!raw) return text;
+
+  const pairs = raw.split('\n')
+    .map(line => {
+      const i = line.indexOf('→');
+      if (i < 0) return null;
+      const spoken   = line.slice(0, i).trim();
+      const intended = line.slice(i + 1).trim();
+      return spoken ? { spoken, intended } : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.spoken.length - a.spoken.length); // longest first
+
+  let result = text;
+  for (const { spoken, intended } of pairs) {
+    const esc = spoken.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    result = result.replace(new RegExp(`\\b${esc}\\b`, 'gi'), intended);
+  }
+  return result;
+}
+
+// ============================================================================
+//  TTS — SpeechSynthesis
+// ============================================================================
+let voices = [];
+
+function initTTS() {
+  if (!('speechSynthesis' in window)) {
+    flash('⚠ TTS not supported. Use Chrome.');
+    return;
+  }
+
+  const load = () => {
+    voices = window.speechSynthesis.getVoices();
+    populateVoiceSel();
+  };
+
+  load();
+  window.speechSynthesis.addEventListener('voiceschanged', load);
+
+  // Android fallback: voiceschanged may not fire; retry after timeout
+  setTimeout(() => {
+    if (voices.length === 0) { load(); }
+  }, VOICE_FALLBACK_MS);
+}
+
+function populateVoiceSel() {
+  const sel   = document.getElementById('voice-sel');
+  const saved = localStorage.getItem('vl_voice') || '';
+  sel.innerHTML = '<option value="">Using device default</option>';
+  voices.forEach(v => {
+    const opt = document.createElement('option');
+    opt.value       = v.name;
+    opt.textContent = `${v.name} (${v.lang})`;
+    if (v.name === saved) opt.selected = true;
+    sel.appendChild(opt);
+  });
+}
+
+function selectedVoice() {
+  const name = document.getElementById('voice-sel').value;
+  return voices.find(v => v.name === name) || null;
+}
+
+function ttsSpeed() {
+  return parseFloat(document.getElementById('speed-slider').value) || 1.0;
+}
+
+function speakBlock(index, skipCancel = false) {
+  if (!S.blocks.length || index < 0 || index >= S.blocks.length) return;
+
+  // skipCancel = true on Resume path: engine was already cancelled by Pause,
+  // so a second cancel() here would reset the settle timer and cause Android
+  // to silently drop the new utterance. Use a longer delay instead.
+  if (!skipCancel) window.speechSynthesis.cancel();
+  const delay = skipCancel ? RESUME_SPEAK_DELAY_MS : CANCEL_SPEAK_DELAY;
+
+  // Android: small delay between cancel() and speak() prevents silence bug
+  setTimeout(() => {
+    const utt  = new SpeechSynthesisUtterance(S.blocks[index]);
+    const v    = selectedVoice();
+    if (v) utt.voice = v;
+    utt.rate = ttsSpeed();
+    utt.lang = 'en-US';
+
+    utt.onstart = () => {
+      S.isPlaying = true;
+      S.isPaused  = false;
+      S.ttsNatural = false;
+      updateWakeLock();
+      updateUI();
+    };
+
+    utt.onend = () => {
+      S.isPlaying  = false;
+      S.isPaused   = false;
+      S.ttsNatural = true;
+      updateWakeLock();
+      updateUI();
+
+      // Auto-record: only on natural completion, not on cancel()
+      if (document.getElementById('auto-rec-chk').checked && !S.isRecording) {
+        setTimeout(() => {
+          if (S.ttsNatural && !S.isRecording) startRecording();
+        }, TTS_STT_DELAY_MS);
+      }
+    };
+
+    utt.onerror = (e) => {
+      if (e.error !== 'interrupted' && e.error !== 'cancelled') {
+        console.warn('TTS error:', e.error);
+      }
+      S.isPlaying = false;
+      updateWakeLock();
+      updateUI();
+    };
+
+    window.speechSynthesis.speak(utt);
+  }, delay);
+}
+
+function togglePlayPause() {
+  if (!S.blocks.length) return;
+
+  if (S.isPlaying || S.isPaused) {
+    // Use cancel() rather than pause() — Android's speechSynthesis.resume()
+    // silently fails after pause(), leaving the engine hung. Cancel + restart
+    // from block beginning is reliable on both desktop and Android.
+    window.speechSynthesis.cancel();
+    S.ttsNatural = false;
+    S.isPlaying  = false;
+    S.isPaused   = true; // stay in paused state so button shows ▶ Resume
+  } else {
+    // Read (initial) or Resume — restart block from beginning.
+    // Always pass skipCancel=true here: either the engine was already cancelled
+    // by the Pause branch (Resume path), or nothing is playing and cancel() is
+    // a no-op anyway. Skipping the second cancel() and using the longer settle
+    // delay prevents Android from silently dropping the new utterance.
+    S.isStopRead = false;
+    S.isPaused   = false;
+    speakBlock(S.cur, true);
+  }
+  updateUI();
+}
+
+function toggleStopResumeReading() {
+  if (!S.isStopRead) {
+    // Stop reading
+    window.speechSynthesis.cancel();
+    S.ttsNatural = false;
+    S.isPlaying  = false;
+    S.isPaused   = false;
+    S.isStopRead = true;
+  } else {
+    // Resume reading from start of current block
+    S.isStopRead = false;
+    speakBlock(S.cur);
+  }
+  updateUI();
+}
+
+function rereadBlock() {
+  S.isStopRead = false;
+  speakBlock(S.cur);
+}
+
+// ============================================================================
+//  STT — SpeechRecognition
+// ============================================================================
+let recog = null;
+let sttAccumulated = ''; // running transcript written to the reply field this session
+
+// ── Screen Wake Lock ──────────────────────────────────────────────────────────
+// Acquired while TTS is playing or STT is recording so the Android screen
+// does not time out mid-session. Released when neither is active.
+// The browser auto-releases the lock when the page is hidden; the 'release'
+// listener below nulls our reference so we don't try to release a stale lock.
+let wakeLock = null;
+
+async function acquireWakeLock() {
+  if (!('wakeLock' in navigator) || wakeLock) return;
+  try {
+    wakeLock = await navigator.wakeLock.request('screen');
+    wakeLock.addEventListener('release', () => { wakeLock = null; });
+  } catch (_) {
+    // Unavailable (older Android, battery-saver mode, permission denied) — silent
+  }
+}
+
+function releaseWakeLock() {
+  if (wakeLock) { wakeLock.release(); wakeLock = null; }
+}
+
+// Acquire if either TTS or STT is active; release when both are idle.
+function updateWakeLock() {
+  if (S.isPlaying || S.isRecording) acquireWakeLock();
+  else releaseWakeLock();
+}
+
+function initSTT() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    setHint('⚠ STT not supported in this browser. Use Chrome.');
+    return;
+  }
+
+  recog = new SR();
+  recog.continuous     = true;
+  recog.interimResults = true;
+  recog.lang           = 'en-US';
+
+  recog.onresult = (ev) => {
+    let interim = '';
+    for (let i = ev.resultIndex; i < ev.results.length; i++) {
+      if (ev.results[i].isFinal) {
+        const transcript = ev.results[i][0].transcript.trim();
+        let toAppend;
+        const acc = sttAccumulated.trim();
+        if (acc.length > 0 &&
+            transcript.length > acc.length &&
+            transcript.toLowerCase().startsWith(acc.toLowerCase()) &&
+            /[\s]|$/.test(transcript[acc.length] || '')) {
+          // Android delivers a full running transcript in each isFinal result
+          // (e.g. "I think" → "I think the" → "I think the study"). Extract
+          // only the new portion by stripping the already-appended prefix.
+          toAppend = transcript.slice(acc.length).trim();
+        } else {
+          // Desktop: each isFinal result contains only the new words.
+          toAppend = transcript;
+        }
+        if (toAppend) {
+          sttAccumulated = acc ? acc + ' ' + toAppend : toAppend;
+          appendReply(applyVocab(toAppend));
+        }
+      } else {
+        interim += ev.results[i][0].transcript;
+      }
+    }
+    // Show live partial result as a non-intrusive hint (never written to reply)
+    setHint(interim ? `…${interim}` : '');
+  };
+
+  // Chrome auto-stops on silence (~7-10s). Restart if user is still recording.
+  // Clear isRecording BEFORE calling recognition.stop() so onend does not
+  // trigger a restart after a deliberate stop.
+  recog.onend = () => {
+    if (S.isRecording) {
+      setTimeout(() => {
+        if (S.isRecording) {
+          try { recog.start(); } catch (_) { /* already running */ }
+        }
+      }, STT_RESTART_DELAY_MS);
+    } else {
+      setHint('');
+      updateUI();
+    }
+  };
+
+  recog.onerror = (ev) => {
+    if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
+      S.isRecording = false;
+      flash('⚠ Microphone permission denied.');
+      updateUI();
+    } else if (ev.error === 'network') {
+      flash('⚠ STT requires an internet connection.');
+    }
+    // 'aborted', 'no-speech', 'audio-capture' → onend will handle restart
+  };
+}
+
+function startRecording() {
+  if (!recog || S.isRecording) return;
+
+  // Cancel TTS if it is playing when recording starts.
+  // cancel() used instead of pause() — pause/resume is unreliable on Android.
+  if (S.isPlaying || S.isPaused) {
+    window.speechSynthesis.cancel();
+    S.ttsNatural = false;
+    S.isPlaying  = false;
+    S.isPaused   = true;
+  }
+
+  sttAccumulated = ''; // reset per recording session (not reset on auto-restart in onend)
+  S.isRecording = true;
+  updateWakeLock();
+  try { recog.start(); } catch (_) { /* already running */ }
+  updateUI();
+}
+
+function stopRecording() {
+  if (!recog) return;
+  S.isRecording = false; // clear flag BEFORE stop → prevents spurious onend restart
+  recog.stop();
+  setHint('');
+  updateWakeLock();
+  updateUI();
+}
+
+function toggleRecording() {
+  S.isRecording ? stopRecording() : startRecording();
+}
+
+// Append a finalised STT segment to the active reply field.
+// Prepend a newline between sessions when the field is non-empty.
+function appendReply(text) {
+  if (!text.trim()) return;
+
+  const desktopTA = document.getElementById('reply-area');
+  const mobileTA  = document.getElementById('mobile-reply-area');
+
+  const existing  = desktopTA.value; // desktop is source of truth
+  const separator = existing ? '\n' : '';
+  const next      = existing + separator + text;
+
+  desktopTA.value = next;
+  mobileTA.value  = next;
+  S.replies[S.cur] = next;
+
+  updateOutputPreview();
+}
+
+// ============================================================================
+//  NAVIGATION
+// ============================================================================
+function goTo(index) {
+  if (!S.blocks.length || index < 0 || index >= S.blocks.length) return;
+
+  saveReply(); // persist current reply before leaving
+
+  if (S.isRecording) stopRecording();
+  window.speechSynthesis.cancel();
+  S.isPlaying  = false;
+  S.isPaused   = false;
+  S.isStopRead = false;
+  S.ttsNatural = false;
+
+  S.cur = index;
+  renderBlock();
+  updateUI();
+}
+
+function nextBlock() {
+  if (!S.blocks.length) return;
+  if (S.cur < S.blocks.length - 1) {
+    goTo(S.cur + 1);
+  } else {
+    // Last block — save and switch to Review on mobile
+    saveReply();
+    updateOutputPreview();
+    if (isMobileView()) switchTab('review');
+  }
+}
+
+function prevBlock() {
+  if (S.cur > 0) goTo(S.cur - 1);
+}
+
+function saveReply() {
+  const ta = activeReplyTA();
+  S.replies[S.cur] = ta ? ta.value : '';
+  updateOutputPreview();
+}
+
+function renderBlock() {
+  const txt = S.blocks[S.cur] || '—';
+  document.getElementById('block-display').textContent        = txt;
+  document.getElementById('mobile-block-display').textContent = txt;
+
+  const reply = S.replies[S.cur] || '';
+  document.getElementById('reply-area').value        = reply;
+  document.getElementById('mobile-reply-area').value = reply;
+}
+
+function clearReply() {
+  document.getElementById('reply-area').value        = '';
+  document.getElementById('mobile-reply-area').value = '';
+  S.replies[S.cur] = '';
+  updateOutputPreview();
+}
+
+function activeReplyTA() {
+  return document.getElementById(isMobileView() ? 'mobile-reply-area' : 'reply-area');
+}
+
+// ============================================================================
+//  OUTPUT DOCUMENT
+// ============================================================================
+function buildOutput() {
+  if (!S.blocks.length) return '';
+  return S.blocks.map((b, i) => {
+    const reply = (S.replies[i] || '').trim() || '[NO REPLY]';
+    return `BLOCK ${i + 1}> ${b}\nREPLY ${i + 1}> ${reply}`;
+  }).join('\n\n');
+}
+
+function updateOutputPreview() {
+  const doc = buildOutput();
+  document.getElementById('output-area').value        = doc;
+  document.getElementById('mobile-output-area').value = doc;
+}
+
+function copyOutput() {
+  saveReply();
+  const text = buildOutput();
+  if (!text) { flash('Nothing to copy.'); return; }
+  copyText(text);
+  flash('✓ Copied to clipboard.');
+}
+
+function downloadOutput() {
+  saveReply();
+  const text = buildOutput();
+  if (!text) return;
+  const url = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+  Object.assign(document.createElement('a'), { href: url, download: 'VoiceLoop_reply.txt' }).click();
+  URL.revokeObjectURL(url);
+}
+
+// navigator.clipboard with execCommand fallback for non-secure contexts
+function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).catch(() => execCopy(text));
+  } else {
+    execCopy(text);
+  }
+}
+
+function execCopy(text) {
+  const el = Object.assign(document.createElement('textarea'), {
+    value: text, style: 'position:fixed;opacity:0;top:0;left:0;'
+  });
+  document.body.appendChild(el);
+  el.select();
+  document.execCommand('copy');
+  document.body.removeChild(el);
+}
+
+// ============================================================================
+//  KEYBOARD SHORTCUTS — desktop only (suppressed on touch devices)
+// ============================================================================
+function initKeyboard() {
+  if (window.matchMedia('(hover: none)').matches) return;
+
+  document.addEventListener('keydown', (e) => {
+    const tag = document.activeElement?.tagName;
+    if (tag === 'TEXTAREA' || tag === 'INPUT' || tag === 'SELECT') return;
+
+    switch (e.key) {
+      case ' ':          e.preventDefault(); togglePlayPause();   break;
+      case 'r': case 'R':e.preventDefault(); rereadBlock();       break;
+      case 'Enter':      e.preventDefault(); toggleRecording();   break;
+      case 'ArrowRight': e.preventDefault(); nextBlock();         break;
+      case 'ArrowLeft':  e.preventDefault(); prevBlock();         break;
+    }
+  });
+}
+
+function toggleKbHint() {
+  document.getElementById('kb-body').classList.toggle('open');
+  const el = document.getElementById('kb-hint');
+  el.textContent = el.textContent.includes('▾')
+    ? '⌨ Keyboard shortcuts ▴'
+    : '⌨ Keyboard shortcuts ▾';
+}
+
+// ============================================================================
+//  APP BACKGROUNDING — visibilitychange
+// ============================================================================
+function initVisibility() {
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      S.bgBlock = S.cur;
+      if (S.isRecording) stopRecording();
+      if (S.isPlaying || S.isPaused) {
+        window.speechSynthesis.cancel();
+        S.isPlaying = false;
+        S.isPaused  = false;
+      }
+      saveReply();
+    } else {
+      if (S.bgBlock !== null && S.blocks.length) {
+        const banner = document.getElementById('resume-banner');
+        banner.textContent = `Paused at Block ${S.bgBlock + 1} — tap to dismiss`;
+        banner.style.display = 'block';
+      }
+    }
+  });
+}
+
+function dismissBanner() {
+  document.getElementById('resume-banner').style.display = 'none';
+  S.bgBlock = null;
+}
+
+// ============================================================================
+//  MOBILE VIEWPORT — keep fixed bar above software keyboard
+// ============================================================================
+function initViewport() {
+  if (!window.visualViewport) return;
+  const adjust = () => {
+    const bar    = document.getElementById('mobile-bar');
+    const offset = Math.max(0, window.innerHeight - window.visualViewport.height);
+    bar.style.bottom = offset + 'px';
+  };
+  window.visualViewport.addEventListener('resize', adjust);
+  window.visualViewport.addEventListener('scroll', adjust);
+}
+
+// ============================================================================
+//  MOBILE TAB SWITCHING
+// ============================================================================
+function switchTab(tab) {
+  S.mobileTab = tab;
+
+  ['input', 'recording', 'review'].forEach(t => {
+    const btn  = document.getElementById(`tab-${t}`);
+    const view = document.getElementById(`view-${t}`);
+    btn?.classList.toggle('active', t === tab);
+    if (view) view.style.display = t === tab ? 'flex' : 'none';
+  });
+
+  const isReview = tab === 'review';
+  document.getElementById('mobile-rec-bar').style.display = isReview ? 'none' : 'flex';
+  document.getElementById('mobile-rev-bar').style.display = isReview ? 'flex' : 'none';
+
+  if (isReview) updateOutputPreview();
+}
+
+// ============================================================================
+//  UI UPDATE — called after any state change
+// ============================================================================
+function updateUI() {
+  const has = S.blocks.length > 0;
+  const i   = S.cur;
+  const n   = S.blocks.length;
+
+  // Progress
+  const prog = has ? `Block ${i + 1} of ${n}` : 'No blocks loaded';
+  setText('d-progress', prog);
+  setText('m-progress', prog);
+
+  // Render block text and reply
+  renderBlock();
+
+  // Play/Pause button
+  const playLabel = S.isPlaying ? '⏸ Pause' : S.isPaused ? '▶ Resume' : '▶ Read';
+  const playClass = S.isPlaying ? 'btn-dark'  : 'btn-muted';
+  setBtn('d-btn-play', playLabel, playClass);
+  setBtn('m-btn-play', S.isPlaying ? '⏸' : '▶', playClass);
+
+  // Stop/Resume Reading button
+  const stopLabel = S.isStopRead ? '▶ Resume Reading' : '⏹ Stop Reading';
+  setBtn('d-btn-stopreading', stopLabel, 'btn-muted');
+  setBtn('m-btn-stopreading', S.isStopRead ? '▶' : '⏹', 'btn-muted');
+
+  // Disable "Resume Reading" while recording (Option A confirmed)
+  disableBtn('d-btn-stopreading', S.isRecording || !has);
+  disableBtn('m-btn-stopreading', S.isRecording || !has);
+
+  // Record button
+  const recLabel = S.isRecording ? '⏹ Stop Recording' : '🎙 Start Recording';
+  const recClass = S.isRecording ? 'btn-recactive' : 'btn-rec';
+  setBtn('d-btn-rec', recLabel, recClass);
+  setBtn('m-btn-rec', S.isRecording ? '⏹' : '🎙', recClass);
+
+  // Nav buttons
+  disableBtn('d-btn-prev', !has || i === 0);
+  disableBtn('d-btn-next', !has);
+  disableBtn('m-btn-prev', !has || i === 0);
+  disableBtn('m-btn-next', !has);
+
+  // Disable all playback controls when no blocks
+  ['d-btn-play','d-btn-reread','d-btn-rec'].forEach(id => disableBtn(id, !has));
+  ['m-btn-play','m-btn-rec'].forEach(id => disableBtn(id, !has));
+
+  updateOutputPreview();
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+function setBtn(id, label, cls) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = label;
+  // Remove existing btn-* classes, then add the new one
+  [...el.classList].filter(c => c.startsWith('btn-')).forEach(c => el.classList.remove(c));
+  el.classList.add(cls);
+}
+
+function disableBtn(id, disabled) {
+  const el = document.getElementById(id);
+  if (el) el.disabled = disabled;
+}
+
+function setText(id, text) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = text;
+}
+
+function setHint(text) {
+  setText('stt-hint', text);
+  setText('mobile-stt-hint', text);
+}
+
+function flash(msg, ms = 3000) {
+  const el = document.getElementById('header-status');
+  el.textContent = msg;
+  setTimeout(() => { if (el.textContent === msg) el.textContent = ''; }, ms);
+}
+
+function isMobileView() {
+  return window.innerWidth < 600;
+}
+
+</script>
+</body>
+</html>
